@@ -7,7 +7,6 @@ from importlib import metadata
 import sys
 from typing import Any
 import httpx
-import time
 
 from .official_protocol import (
     DEFAULT_OFFICIAL_TITLE_ENDPOINTS,
@@ -162,9 +161,6 @@ class MaimaiService:
         self.official_title_key = (official_title_key or "SDGB").strip() or "SDGB"
         self.official_interface_enabled = bool(official_interface_enabled)
         self._ffi_request_lock = asyncio.Lock()
-        # 新增落雪曲目缓存
-        self._luoxue_song_ids: set[int] | None = None
-        self._luoxue_song_ids_updated_at: float = 0
 
     def _ensure_dependency_versions(self) -> None:
         requirements = (
@@ -1039,14 +1035,13 @@ class MaimaiService:
                 return message
         return f"操作失败：{exc.__class__.__name__}: {exc}"
     
-    # ====== 新增落雪方法（使用个人 API）======
-    async def _upload_to_luoxue(self, scores: list[dict], api_key: str) -> dict:
+    async def _upload_to_luoxue(self, scores: list[dict], friend_code: str, api_key: str) -> dict:
         """
-        使用落雪个人 API 上传成绩（操作的是 API 密钥所属用户自己的数据）
+        调用落雪 API 上传成绩
         """
-        url = "https://maimai.lxns.net/api/v0/user/maimai/player/scores"
+        url = f"https://maimai.lxns.net/api/v0/maimai/player/{friend_code}/scores"
         headers = {
-            "X-User-Token": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {"scores": scores}
@@ -1063,70 +1058,64 @@ class MaimaiService:
         SongType = imports["SongType"]
         scores = []
         for detail in details:
-            music_id_original = int(detail.get("musicId") or 0)
-            if music_id_original <= 0:
+            music_id = int(detail.get("musicId") or 0)
+            if music_id <= 0:
                 continue
+            # 谱面类型
+            song_type = SongType._from_id(music_id)
+            type_str = "standard" if song_type == SongType.STANDARD else "dx"
 
-            # 确定谱面类型（使用原始 ID）
-            song_type = SongType._from_id(music_id_original)
-            if song_type == SongType.STANDARD:
-                type_str = "standard"
-            elif song_type == SongType.DX:
-                type_str = "dx"
-            elif song_type == SongType.UTAGE or music_id_original > 100000:
-                type_str = "utage"
-            else:
-                type_str = "standard"
-
-            # 难度索引
+            # 难度索引：复用现有逻辑
+            level_index = self._official_level_index(music_id, int(detail.get("level") or 0))
+            # 注意：_official_level_index 返回的是 LevelIndex 枚举对象，需要取其值（int）
+            # 但这里我们直接使用 level 字段的值，可能已经是 0~4
+            # 为了兼容，我们从 detail 中取 level 并转为 int（落雪要求 0~4）
+            # 如果官方返回的是字符串如 "MASTER"，则需要映射，但一般情况下 level 是整数索引
             raw_level = detail.get("level")
             try:
                 level_idx = int(raw_level) if raw_level is not None else 0
             except (TypeError, ValueError):
+                # 如果无法转换，默认 0
                 level_idx = 0
-
-            # 宴会场曲目特殊处理：level_index 强制为 0
-            if type_str == "utage":
+            # 确保在 0~4 之间
+            if level_idx < 0:
                 level_idx = 0
-            else:
-                if level_idx < 0:
-                    level_idx = 0
-                elif level_idx > 4:
-                    level_idx = 4
+            elif level_idx > 4:
+                level_idx = 4
 
-            # 转换曲目 ID：宴会场保持原样，其他取余 10000
-            if music_id_original > 100000:
-                song_id_for_luoxue = music_id_original
-            else:
-                song_id_for_luoxue = music_id_original % 10000
-
-            # 达成率（万分制转百分比）
+            # 达成率（万分制）
             achievement = float(detail.get("achievement") or 0) / 10000
 
-            # FC/FS 状态（转为落雪小写）
+            # FC/FS 状态
             combo_status = self._official_combo_status_from_detail(detail)
-            fc = combo_status_to_fc_name(combo_status)
+            fc = combo_status_to_fc_name(combo_status)  # 返回 "fc", "fcp", "ap", "app" 或 None
+            # 落雪接受小写 "fc", "fcp", "ap", "app"，而 combo_status_to_fc_name 返回大写，需要转换
             if fc:
                 fc = fc.lower()
             sync_status = self._official_sync_status_from_detail(detail)
             fs = sync_status_to_fs_name(sync_status)
             if fs:
-                fs = fs.lower()
+                fs = fs.lower()  # 落雪接受 "fs", "fsp", "fsd", "fsdp"
 
             score = {
-                "id": song_id_for_luoxue,
+                "id": music_id,
                 "type": type_str,
                 "level_index": level_idx,
                 "achievements": achievement,
                 "fc": fc,
                 "fs": fs,
                 "dx_score": int(detail.get("deluxscoreMax") or detail.get("deluxeScoreMax") or detail.get("dx_score") or 0),
+                # "play_time": 可从 detail 中提取时间字段，但暂不处理
             }
             scores.append(score)
         return scores
 
-    async def sync_from_sgid_to_luoxue(self, *, sgid: str, api_key: str) -> SyncResult:
-        # 1. 获取官方成绩（同前）
+    async def sync_from_sgid_to_luoxue(self, *, sgid: str, friend_code: str, api_key: str) -> SyncResult:
+        """
+        从 SGID 获取官方成绩并上传至落雪查分器
+        """
+        # 1. 获取官方成绩详情（复用现有逻辑）
+        # 优先使用独立接口，否则使用内置协议
         if self._load_official_interface_client_cls() is not None:
             details, rating, _endpoint = await self._fetch_official_interface_details_and_rating(sgid)
         else:
@@ -1140,41 +1129,20 @@ class MaimaiService:
         if not luoxue_scores:
             raise OfficialTitleServerError("没有有效的成绩可上传")
 
-        # 3. 获取落雪有效曲目 ID，过滤无效成绩
+        # 3. 调用落雪 API 上传
         try:
-            valid_ids = await self._get_luoxue_song_ids()
-            original_count = len(luoxue_scores)
-            luoxue_scores = [s for s in luoxue_scores if s["id"] in valid_ids]
-            filtered_count = original_count - len(luoxue_scores)
-            if filtered_count > 0:
-                logger.warning(
-                    "[MaimaiUpdater] filtered %s scores not found in luoxue song list",
-                    filtered_count
-                )
-        except Exception as e:
-            logger.warning("[MaimaiUpdater] failed to get luoxue song list, skip filtering: %s", e)
-            # 若获取失败，则不过滤，继续尝试上传（可能失败）
-
-        if not luoxue_scores:
-            raise OfficialTitleServerError("过滤后没有有效的成绩可上传（落雪未收录相关曲目）")
-
-        # 4. 调用落雪个人 API
-        try:
-            result_json = await self._upload_to_luoxue(luoxue_scores, api_key)
+            result_json = await self._upload_to_luoxue(luoxue_scores, friend_code, api_key)
             if not result_json.get("success"):
                 raise Exception(result_json.get("message", "落雪 API 返回失败"))
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
-                raise Exception(
-                    "落雪账号未开启第三方写入权限（allow_third_party_write_data），"
-                    "请前往落雪查分器个人设置中开启。"
-                )
-            elif e.response.status_code == 401:
-                raise Exception("落雪 API 密钥无效或已过期，请重新生成并绑定。")
+                raise Exception("落雪账号未开启第三方写入权限，请前往落雪网站设置 allow_third_party_write_data。")
+            elif e.response.status_code == 404:
+                raise Exception("好友码不存在，请核对后重新绑定。")
             else:
                 raise Exception(f"落雪 API 请求失败：{e.response.status_code} - {e.response.text}")
 
-        # 5. 返回结果
+        # 4. 返回结果
         marked_count = sum(1 for s in luoxue_scores if s.get("fc") or s.get("fs"))
         return SyncResult(
             player_name="",
@@ -1184,19 +1152,3 @@ class MaimaiService:
             source="official",
             player_warning="",
         )
-
-    async def _get_luoxue_song_ids(self) -> set[int]:
-        """获取落雪所有曲目 ID，缓存 1 小时"""
-        now = time.time()
-        if self._luoxue_song_ids is not None and (now - self._luoxue_song_ids_updated_at) < 3600:
-            return self._luoxue_song_ids
-        url = "https://maimai.lxns.net/api/v0/maimai/song/list"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            songs = data.get("songs", [])
-            ids = {song["id"] for song in songs if "id" in song}
-            self._luoxue_song_ids = ids
-            self._luoxue_song_ids_updated_at = now
-            return ids

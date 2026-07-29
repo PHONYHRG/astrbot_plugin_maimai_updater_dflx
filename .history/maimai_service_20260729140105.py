@@ -1063,47 +1063,24 @@ class MaimaiService:
         SongType = imports["SongType"]
         scores = []
         for detail in details:
-            music_id_original = int(detail.get("musicId") or 0)
-            if music_id_original <= 0:
+            music_id = int(detail.get("musicId") or 0)
+            if music_id <= 0:
                 continue
-
-            # 确定谱面类型（使用原始 ID）
-            song_type = SongType._from_id(music_id_original)
-            if song_type == SongType.STANDARD:
-                type_str = "standard"
-            elif song_type == SongType.DX:
-                type_str = "dx"
-            elif song_type == SongType.UTAGE or music_id_original > 100000:
-                type_str = "utage"
-            else:
-                type_str = "standard"
-
+            song_type = SongType._from_id(music_id)
+            type_str = "standard" if song_type == SongType.STANDARD else "dx"
             # 难度索引
             raw_level = detail.get("level")
             try:
                 level_idx = int(raw_level) if raw_level is not None else 0
             except (TypeError, ValueError):
                 level_idx = 0
-
-            # 宴会场曲目特殊处理：level_index 强制为 0
-            if type_str == "utage":
+            if level_idx < 0:
                 level_idx = 0
-            else:
-                if level_idx < 0:
-                    level_idx = 0
-                elif level_idx > 4:
-                    level_idx = 4
-
-            # 转换曲目 ID：宴会场保持原样，其他取余 10000
-            if music_id_original > 100000:
-                song_id_for_luoxue = music_id_original
-            else:
-                song_id_for_luoxue = music_id_original % 10000
-
+            elif level_idx > 4:
+                level_idx = 4
             # 达成率（万分制转百分比）
             achievement = float(detail.get("achievement") or 0) / 10000
-
-            # FC/FS 状态（转为落雪小写）
+            # FC/FS
             combo_status = self._official_combo_status_from_detail(detail)
             fc = combo_status_to_fc_name(combo_status)
             if fc:
@@ -1112,9 +1089,8 @@ class MaimaiService:
             fs = sync_status_to_fs_name(sync_status)
             if fs:
                 fs = fs.lower()
-
             score = {
-                "id": song_id_for_luoxue,
+                "id": music_id,
                 "type": type_str,
                 "level_index": level_idx,
                 "achievements": achievement,

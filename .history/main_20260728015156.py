@@ -37,8 +37,8 @@ PLAIN_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 @register(
-    "astrbot_plugin_maimai_updater_dflx",
-    "Phony",
+    "astrbot_plugin_maimai_updater",
+    "User",
     "使用一次性舞萌官方二维码凭据，把官方成绩同步到水鱼。",
     "0.6.27",
     "",
@@ -49,7 +49,7 @@ class MaimaiUpdaterPlugin(Star):
         self.context = context
         self.config = config or {}
 
-        data_dir = StarTools.get_data_dir(plugin_name="astrbot_plugin_maimai_updater_dflx")
+        data_dir = StarTools.get_data_dir(plugin_name="astrbot_plugin_maimai_updater")
         self.store = UserStore(data_dir)
 
         self.require_command_prefix = self._require_command_prefix_config()
@@ -224,8 +224,6 @@ class MaimaiUpdaterPlugin(Star):
             lines.append(f"⚠️ {result.player_warning}")
         await self._send_text(event, "\n".join(lines))
 
-    # ========== 水鱼命令 ==========
-
     @command("maimaitoken", alias={"水鱼绑定", "绑定水鱼"})
     async def bind_token(self, event: AstrMessageEvent, token: str = ""):
         token = (token or "").strip()
@@ -329,8 +327,9 @@ class MaimaiUpdaterPlugin(Star):
             )
         lines.append("官方 SGID：每次更新临时提供")
         lines.append(f"水鱼 Token：{mask_secret(record.divingfish_import_token)}")
-        # 落雪绑定信息（使用 hasattr 安全访问）
-        if hasattr(record, 'luoxue_api_key') and record.luoxue_api_key:
+        # 落雪绑定信息
+        if record.luoxue_friend_code:
+            lines.append(f"落雪好友码：{record.luoxue_friend_code}")
             lines.append(f"落雪 API Key：{mask_secret(record.luoxue_api_key)}")
         else:
             lines.append("落雪：未绑定")
@@ -348,30 +347,36 @@ class MaimaiUpdaterPlugin(Star):
             return self._message("✅ 已删除你的水鱼 Token 和本地展示状态。")
         return self._message("当前没有保存的绑定信息。")
 
-    # ====== 落雪命令（修改）======
+    # ========== 新增落雪查分器命令 ==========
+
     @command("luoxuebind", alias={"落雪绑定"})
-    async def bind_luoxue(self, event: AstrMessageEvent, api_key: str = ""):
-        """绑定落雪个人 API 密钥"""
+    async def bind_luoxue(self, event: AstrMessageEvent, friend_code: str = "", api_key: str = ""):
+        """绑定落雪好友码和 API 密钥"""
+        friend_code = friend_code.strip()
         api_key = api_key.strip()
-        if not api_key:
+        if not friend_code or not api_key:
             return self._message(
-                "用法：落雪绑定 <API密钥>\n"
-                "API密钥可在落雪查分器个人设置中获取。"
+                "用法：落雪绑定 <好友码> <API密钥>\n"
+                "好友码要从舞萌公众号内的好友选项卡里的查看好友码获取，API密钥可在落雪查分器个人设置中获取。"
             )
 
         event.stop_event()
         await self._recall_current_message(event)
 
+        # 简单校验
+        if not friend_code.isdigit() or len(friend_code) < 10:
+            await self._send_text(event, "❌ 好友码格式不正确，应为纯数字且长度至少10位。")
+            return
         if len(api_key) < 20:
             await self._send_text(event, "❌ API 密钥格式似乎不正确，长度过短。")
             return
 
         user_key = self._user_key(event)
-        await self.store.set_luoxue_api_key(user_key, api_key)
+        await self.store.set_luoxue_credentials(user_key, friend_code, api_key)
 
         await self._send_text(
             event,
-            f"✅ 落雪 API 密钥绑定成功：{mask_secret(api_key)}\n"
+            f"✅ 落雪绑定成功！好友码：{friend_code}，API密钥已保存。\n"
             "现在可以使用 落雪更新 <SGID> 上传成绩。"
         )
 
@@ -395,10 +400,10 @@ class MaimaiUpdaterPlugin(Star):
 
         user_key = self._user_key(event)
         record = self.store.get(user_key)
-        if not record.luoxue_api_key:
+        if not record.luoxue_friend_code or not record.luoxue_api_key:
             await self._send_text(
                 event,
-                "❌ 尚未绑定落雪 API 密钥，请先执行 落雪绑定 <API密钥>。"
+                "❌ 尚未绑定落雪账号，请先执行 落雪绑定 <好友码> <API密钥>。"
             )
             return
 
@@ -406,6 +411,7 @@ class MaimaiUpdaterPlugin(Star):
         try:
             result = await self.service.sync_from_sgid_to_luoxue(
                 sgid=sgid,
+                friend_code=record.luoxue_friend_code,
                 api_key=record.luoxue_api_key
             )
         except Exception as exc:
@@ -434,7 +440,8 @@ class MaimaiUpdaterPlugin(Star):
             lines.append(f"⚠️ {result.player_warning}")
         await self._send_text(event, "\n".join(lines))
 
-    # ====== 免前缀命令处理器（更新）======
+    # ========== 免前缀命令处理器 ==========
+
     @event_message_type(EventMessageType.ALL)
     async def handle_plain_command(self, event: AstrMessageEvent):
         parsed = self._parse_plain_command(event.message_str or "")
@@ -443,6 +450,7 @@ class MaimaiUpdaterPlugin(Star):
 
         event.stop_event()
         command_key, argument = parsed
+        # 分发到对应的命令方法
         if command_key == "token":
             result = await self.bind_token(event, argument)
         elif command_key == "update":
@@ -454,7 +462,11 @@ class MaimaiUpdaterPlugin(Star):
         elif command_key == "unbind":
             result = await self.unbind(event)
         elif command_key == "luoxuebind":
-            result = await self.bind_luoxue(event, argument)
+            # 对于落雪绑定，需要解析两个参数：好友码和API密钥，用空格分隔
+            parts = argument.split()
+            friend_code = parts[0] if len(parts) > 0 else ""
+            api_key = " ".join(parts[1:]) if len(parts) > 1 else ""
+            result = await self.bind_luoxue(event, friend_code, api_key)
         elif command_key == "luoxueupdate":
             result = await self.update_luoxue(event, argument)
         else:

@@ -329,8 +329,9 @@ class MaimaiUpdaterPlugin(Star):
             )
         lines.append("官方 SGID：每次更新临时提供")
         lines.append(f"水鱼 Token：{mask_secret(record.divingfish_import_token)}")
-        # 落雪绑定信息（使用 hasattr 安全访问）
-        if hasattr(record, 'luoxue_api_key') and record.luoxue_api_key:
+        # 落雪绑定信息
+        if record.luoxue_friend_code:
+            lines.append(f"落雪好友码：{record.luoxue_friend_code}")
             lines.append(f"落雪 API Key：{mask_secret(record.luoxue_api_key)}")
         else:
             lines.append("落雪：未绑定")

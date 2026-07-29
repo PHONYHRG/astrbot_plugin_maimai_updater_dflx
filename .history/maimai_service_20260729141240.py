@@ -1063,19 +1063,20 @@ class MaimaiService:
         SongType = imports["SongType"]
         scores = []
         for detail in details:
-            music_id_original = int(detail.get("musicId") or 0)
-            if music_id_original <= 0:
+            music_id = int(detail.get("musicId") or 0)
+            if music_id <= 0:
                 continue
 
-            # 确定谱面类型（使用原始 ID）
-            song_type = SongType._from_id(music_id_original)
+            # 判断谱面类型（标准/DX/宴会场）
+            song_type = SongType._from_id(music_id)
             if song_type == SongType.STANDARD:
                 type_str = "standard"
             elif song_type == SongType.DX:
                 type_str = "dx"
-            elif song_type == SongType.UTAGE or music_id_original > 100000:
+            elif song_type == SongType.UTAGE or music_id > 100000:
                 type_str = "utage"
             else:
+                # 保底逻辑
                 type_str = "standard"
 
             # 难度索引
@@ -1085,20 +1086,15 @@ class MaimaiService:
             except (TypeError, ValueError):
                 level_idx = 0
 
-            # 宴会场曲目特殊处理：level_index 强制为 0
+            # 宴会场曲目特殊处理：落雪文档中宴会场曲目 level_index 默认为 0
             if type_str == "utage":
                 level_idx = 0
             else:
+                # 非宴会场确保在 0~4 之间
                 if level_idx < 0:
                     level_idx = 0
                 elif level_idx > 4:
                     level_idx = 4
-
-            # 转换曲目 ID：宴会场保持原样，其他取余 10000
-            if music_id_original > 100000:
-                song_id_for_luoxue = music_id_original
-            else:
-                song_id_for_luoxue = music_id_original % 10000
 
             # 达成率（万分制转百分比）
             achievement = float(detail.get("achievement") or 0) / 10000
@@ -1114,7 +1110,7 @@ class MaimaiService:
                 fs = fs.lower()
 
             score = {
-                "id": song_id_for_luoxue,
+                "id": music_id,
                 "type": type_str,
                 "level_index": level_idx,
                 "achievements": achievement,

@@ -24,15 +24,12 @@ from .utils import (
 )
 
 
-# 免前缀命令映射：命令键 -> (命令文本元组)
 PLAIN_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("token", ("maimaitoken", "水鱼绑定", "绑定水鱼")),
-    ("update", ("maimaiupdate", "更新水鱼", "水鱼更新", "更新B50", "更新b50", "导")),
+    ("update", ("maimaiupdate", "更新水鱼", "水鱼更新", "更新B50", "更新b50")),
     ("clear", ("maimaiclear", "清空水鱼", "清空B50", "清空b50")),
     ("status", ("maimaistatus", "水鱼状态")),
     ("unbind", ("maimaiunbind", "水鱼解绑")),
-    ("luoxuebind", ("落雪绑定",)),
-    ("luoxueupdate", ("落雪更新",)),
 )
 
 
@@ -40,7 +37,7 @@ PLAIN_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     "astrbot_plugin_maimai_updater_dflx",
     "Phony",
     "使用一次性舞萌官方二维码凭据，把官方成绩同步到水鱼。",
-    "0.6.27",
+    "0.6.17",
     "",
 )
 class MaimaiUpdaterPlugin(Star):
@@ -224,8 +221,6 @@ class MaimaiUpdaterPlugin(Star):
             lines.append(f"⚠️ {result.player_warning}")
         await self._send_text(event, "\n".join(lines))
 
-    # ========== 水鱼命令 ==========
-
     @command("maimaitoken", alias={"水鱼绑定", "绑定水鱼"})
     async def bind_token(self, event: AstrMessageEvent, token: str = ""):
         token = (token or "").strip()
@@ -329,11 +324,6 @@ class MaimaiUpdaterPlugin(Star):
             )
         lines.append("官方 SGID：每次更新临时提供")
         lines.append(f"水鱼 Token：{mask_secret(record.divingfish_import_token)}")
-        # 落雪绑定信息（使用 hasattr 安全访问）
-        if hasattr(record, 'luoxue_api_key') and record.luoxue_api_key:
-            lines.append(f"落雪 API Key：{mask_secret(record.luoxue_api_key)}")
-        else:
-            lines.append("落雪：未绑定")
         if record.rating:
             lines.append(f"Rating：{record.rating}")
         lines.append(f"上次更新：{format_ts(record.last_sync_at)}")
@@ -348,93 +338,6 @@ class MaimaiUpdaterPlugin(Star):
             return self._message("✅ 已删除你的水鱼 Token 和本地展示状态。")
         return self._message("当前没有保存的绑定信息。")
 
-    # ====== 落雪命令（修改）======
-    @command("luoxuebind", alias={"落雪绑定"})
-    async def bind_luoxue(self, event: AstrMessageEvent, api_key: str = ""):
-        """绑定落雪个人 API 密钥"""
-        api_key = api_key.strip()
-        if not api_key:
-            return self._message(
-                "用法：落雪绑定 <API密钥>\n"
-                "API密钥可在落雪查分器个人设置中获取。"
-            )
-
-        event.stop_event()
-        await self._recall_current_message(event)
-
-        if len(api_key) < 20:
-            await self._send_text(event, "❌ API 密钥格式似乎不正确，长度过短。")
-            return
-
-        user_key = self._user_key(event)
-        await self.store.set_luoxue_api_key(user_key, api_key)
-
-        await self._send_text(
-            event,
-            f"✅ 落雪 API 密钥绑定成功：{mask_secret(api_key)}\n"
-            "现在可以使用 落雪更新 <SGID> 上传成绩。"
-        )
-
-    @command("luoxueupdate", alias={"落雪更新"})
-    async def update_luoxue(self, event: AstrMessageEvent, credential_text: str = ""):
-        """使用 SGID 更新落雪成绩"""
-        credential_text = (credential_text or "").strip()
-        sgid = extract_sgid(credential_text)
-        if not sgid:
-            return self._message(
-                "用法：落雪更新 <SGID> 或 落雪更新 SGWCMAID...\n"
-                "注意：SGID 只能使用一次，请每次从官方二维码重新识别后再更新。"
-            )
-
-        event.stop_event()
-        await self._recall_current_message(event)
-
-        if validation_error := self._validate_sgid_for_one_time_use(sgid):
-            await self._send_text(event, f"❌ {validation_error}")
-            return
-
-        user_key = self._user_key(event)
-        record = self.store.get(user_key)
-        if not record.luoxue_api_key:
-            await self._send_text(
-                event,
-                "❌ 尚未绑定落雪 API 密钥，请先执行 落雪绑定 <API密钥>。"
-            )
-            return
-
-        await self._send_text(event, "⏳ 正在从官方获取成绩并上传到落雪查分器，请稍候...")
-        try:
-            result = await self.service.sync_from_sgid_to_luoxue(
-                sgid=sgid,
-                api_key=record.luoxue_api_key
-            )
-        except Exception as exc:
-            logger.exception("[MaimaiUpdater] luoxue update failed")
-            msg = self.service.describe_error(exc)
-            await self.store.set_sync_result(
-                user_key,
-                rating=record.rating,
-                result=f"落雪上传失败：{msg}",
-            )
-            await self._send_text(event, f"❌ 落雪上传失败：{msg}")
-            return
-
-        await self.store.set_sync_result(
-            user_key,
-            rating=result.rating,
-            result=f"落雪上传成功，{result.score_count} 条成绩"
-        )
-        lines = [
-            "✅ 落雪查分器更新完成！",
-            f"Rating：{result.rating}",
-            f"成绩数：{result.score_count}",
-            f"特殊标识：{result.marked_score_count} 条含 FC/FS/AP",
-        ]
-        if result.player_warning:
-            lines.append(f"⚠️ {result.player_warning}")
-        await self._send_text(event, "\n".join(lines))
-
-    # ====== 免前缀命令处理器（更新）======
     @event_message_type(EventMessageType.ALL)
     async def handle_plain_command(self, event: AstrMessageEvent):
         parsed = self._parse_plain_command(event.message_str or "")
@@ -453,10 +356,6 @@ class MaimaiUpdaterPlugin(Star):
             result = await self.status(event)
         elif command_key == "unbind":
             result = await self.unbind(event)
-        elif command_key == "luoxuebind":
-            result = await self.bind_luoxue(event, argument)
-        elif command_key == "luoxueupdate":
-            result = await self.update_luoxue(event, argument)
         else:
             return
         await self._send_command_result(event, result)

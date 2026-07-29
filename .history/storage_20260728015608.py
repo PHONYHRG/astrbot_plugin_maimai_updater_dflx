@@ -16,6 +16,8 @@ class UserRecord:
     bound_at: int = 0
     last_sync_at: int = 0
     last_sync_result: str = ""
+    # 新增落雪字段
+    luoxue_friend_code: str = ""      # 落雪好友码
     luoxue_api_key: str = ""          # 落雪个人 API 密钥
 
     @classmethod
@@ -28,6 +30,7 @@ class UserRecord:
             bound_at=safe_int(raw.get("bound_at"), 0),
             last_sync_at=safe_int(raw.get("last_sync_at"), 0),
             last_sync_result=str(raw.get("last_sync_result") or ""),
+            luoxue_friend_code=str(raw.get("luoxue_friend_code") or ""),
             luoxue_api_key=str(raw.get("luoxue_api_key") or ""),
         )
 
@@ -122,10 +125,11 @@ class UserStore:
             await self.save()
             return existed
 
-    # 设置落雪 API 密钥
-    async def set_luoxue_api_key(self, user_key: str, api_key: str) -> UserRecord:
+    # 新增落雪凭据设置方法
+    async def set_luoxue_credentials(self, user_key: str, friend_code: str, api_key: str) -> UserRecord:
         async with self._lock:
             record = self.get(user_key)
+            record.luoxue_friend_code = friend_code
             record.luoxue_api_key = api_key
             self._users[user_key] = record
             await self.save()
