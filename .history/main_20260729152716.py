@@ -22,10 +22,6 @@ from .utils import (
     require_command_prefix_from_config,
     validate_sgid_freshness,
 )
-from .official_protocol import (
-    DEFAULT_OFFICIAL_TITLE_ENDPOINTS,
-    OfficialProtocolUnavailableError,
-)
 
 
 # 免前缀命令映射：命令键 -> (命令文本元组)
@@ -45,7 +41,7 @@ PLAIN_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     "astrbot_plugin_maimai_updater_dflx",
     "Phony",
     "使用一次性舞萌官方二维码凭据，把官方成绩同步到水鱼。",
-    "0.6.28",
+    "0.6.27",
     "",
 )
 class MaimaiUpdaterPlugin(Star):
@@ -439,17 +435,21 @@ class MaimaiUpdaterPlugin(Star):
             lines.append(f"⚠️ {result.player_warning}")
         await self._send_text(event, "\n".join(lines))
 
-    @command("multi", alias={"导", "同时更新"})
+    @command("multi", alias={"导"})
     async def update_multi(self, event: AstrMessageEvent, credential_text: str = ""):
         """同时更新水鱼和落雪"""
         credential_text = (credential_text or "").strip()
         sgid = extract_sgid(credential_text)
         if not sgid:
-            return self._message("用法：导 <SGID> 或 同时更新 <SGID>\n此命令会同时将成绩同步到水鱼和落雪两个平台。")
+            return self._message(
+                "用法：导 <SGID> 或 同时更新 <SGID>\n"
+                "此命令会同时将成绩同步到水鱼和落雪两个平台。"
+            )
 
         event.stop_event()
         await self._recall_current_message(event)
 
+        # 校验 SGID
         if validation_error := self._validate_sgid_for_one_time_use(sgid):
             await self._send_text(event, f"❌ {validation_error}")
             return
@@ -457,62 +457,85 @@ class MaimaiUpdaterPlugin(Star):
         user_key = self._user_key(event)
         record = self.store.get(user_key)
 
+        # 检查是否绑定必要凭据
         has_divingfish = bool(record.divingfish_import_token)
         has_luoxue = bool(record.luoxue_api_key)
-
         if not has_divingfish and not has_luoxue:
             await self._send_text(event, "❌ 您尚未绑定任何查分器账号，请先绑定水鱼或落雪。")
             return
 
-        await self._send_text(event, "⏳ 正在从官方获取成绩...")
-
-        # 1. 获取官方数据（仅一次）
-        try:
-            if self.service._load_official_interface_client_cls() is not None:
-                details, rating, _endpoint = await self.service._fetch_official_interface_details_and_rating(sgid)
-            else:
-                if not DEFAULT_OFFICIAL_TITLE_ENDPOINTS:
-                    raise OfficialProtocolUnavailableError("official title endpoint has not been resolved")
-                session = await self.service._official_session_from_sgid(sgid)
-                details, rating, _endpoint = await self.service._fetch_official_details_and_rating(session)
-        except Exception as e:
-            msg = self.service.describe_error(e)
-            await self._send_text(event, f"❌ 获取官方成绩失败：{msg}")
-            return
+        await self._send_text(event, "⏳ 正在同时更新水鱼和落雪，请稍候...")
 
         results = []
-        # 2. 更新水鱼
+
+        # 1. 更新水鱼
         if has_divingfish:
             try:
-                divingfish_result = await self.service._upload_divingfish_from_details(details, rating, record.divingfish_import_token)
-                results.append(f"🌊 水鱼：✅ 成功，{divingfish_result.score_count} 条成绩（Rating: {divingfish_result.rating}）")
-                await self.store.set_sync_result(user_key, rating=divingfish_result.rating, result=f"水鱼更新成功，{divingfish_result.score_count} 条成绩")
+                divingfish_result = await self.service.sync_from_sgid_to_divingfish(
+                    sgid=sgid,
+                    import_token=record.divingfish_import_token,
+                )
+                await self.store.set_sync_result(
+                    user_key,
+                    rating=divingfish_result.rating,
+                    result=f"水鱼更新成功，{divingfish_result.score_count} 条成绩"
+                )
+                results.append(
+                    f"🌊 水鱼：✅ 成功，{divingfish_result.score_count} 条成绩"
+                    f"（Rating: {divingfish_result.rating}）"
+                )
             except Exception as e:
                 msg = self.service.describe_error(e)
-                logger.exception("[MaimaiUpdater] divingfish upload failed")
+                logger.exception("[MaimaiUpdater] divingfish multi update failed")
+                await self.store.set_sync_result(
+                    user_key,
+                    rating=record.rating,
+                    result=f"水鱼更新失败：{msg}"
+                )
                 results.append(f"🌊 水鱼：❌ 失败 - {msg}")
-                await self.store.set_sync_result(user_key, rating=record.rating, result=f"水鱼更新失败：{msg}")
         else:
             results.append("🌊 水鱼：⏭️ 未绑定，跳过")
 
-        # 3. 更新落雪
+        # 2. 更新落雪
         if has_luoxue:
             try:
-                luoxue_result = await self.service._upload_luoxue_from_details(details, rating, record.luoxue_api_key)
-                results.append(f"❄️ 落雪：✅ 成功，{luoxue_result.score_count} 条成绩（Rating: {luoxue_result.rating}）")
-                # 落雪更新也记录一次同步结果（但覆盖 rating 可能用水鱼或落雪，这里用落雪）
-                await self.store.set_sync_result(user_key, rating=luoxue_result.rating, result=f"落雪更新成功，{luoxue_result.score_count} 条成绩")
+                luoxue_result = await self.service.sync_from_sgid_to_luoxue(
+                    sgid=sgid,
+                    api_key=record.luoxue_api_key,
+                )
+                # 落雪更新后也记录到同步结果（但存储只有一个 rating，可能被覆盖，我们用水鱼的 rating 作为主）
+                # 我们也可以单独存储落雪结果，但为了简单，只记录水鱼或综合？建议单独记录落雪结果，但存储只保留一个，我们选择记录水鱼的 rating（或最后一次）
+                # 这里我们保存水鱼的 rating，但落雪结果单独在消息中展示。
+                await self.store.set_sync_result(
+                    user_key,
+                    rating=luoxue_result.rating,  # 用落雪 rating 覆盖（或保留水鱼？可改为取最高）
+                    result=f"落雪更新成功，{luoxue_result.score_count} 条成绩"
+                )
+                results.append(
+                    f"❄️ 落雪：✅ 成功，{luoxue_result.score_count} 条成绩"
+                    f"（Rating: {luoxue_result.rating}）"
+                )
             except Exception as e:
                 msg = self.service.describe_error(e)
-                logger.exception("[MaimaiUpdater] luoxue upload failed")
+                logger.exception("[MaimaiUpdater] luoxue multi update failed")
+                # 落雪失败，不覆盖存储，但记录失败信息
+                await self.store.set_sync_result(
+                    user_key,
+                    rating=record.rating,
+                    result=f"落雪更新失败：{msg}"
+                )
                 results.append(f"❄️ 落雪：❌ 失败 - {msg}")
-                await self.store.set_sync_result(user_key, rating=record.rating, result=f"落雪更新失败：{msg}")
         else:
             results.append("❄️ 落雪：⏭️ 未绑定，跳过")
 
         # 汇总消息
         lines = ["📊 同步完成汇总："]
         lines.extend(results)
+        if not any("✅" in r for r in results):
+            lines.append("⚠️ 所有更新均失败或跳过，请检查绑定状态。")
+        else:
+            lines.append("📌 可以继续使用各平台查询最新数据。")
+
         await self._send_text(event, "\n".join(lines))
 
     # ====== 免前缀命令处理器（更新）======
@@ -538,8 +561,6 @@ class MaimaiUpdaterPlugin(Star):
             result = await self.bind_luoxue(event, argument)
         elif command_key == "luoxueupdate":
             result = await self.update_luoxue(event, argument)
-        elif command_key == "multi":
-            result = await self.update_multi(event, argument)
         else:
             return
         await self._send_command_result(event, result)
